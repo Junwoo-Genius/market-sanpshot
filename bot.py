@@ -73,6 +73,7 @@ def fetch_daily_adjusted(symbol):
         r = requests.get(url, params=params, timeout=30)
         data = r.json()
         last_keys = list(data.keys())
+        print(f"[{symbol}] keys={list(data.keys())}", flush=True)
 
         ts = data.get("Time Series (Daily)")
         if ts:
