@@ -1,349 +1,115 @@
-import os
-import json
-import time
-import requests
-from datetime import datetime, timezone
-
-# ===== Fixed params =====
-RSI_PERIOD = 14
-EMA_PERIOD = 20
-SMA_PERIOD = 60
-
-TICKERS_FILE = os.environ.get("TICKERS_FILE", "tickers.txt")
-OUT_PATH = os.environ.get("OUT_PATH", "public/report.json")
-
-# Yahoo chart API settings
-RANGE_STR = os.environ.get("YAHOO_RANGE", "10y")   # "10y" or "max"
-INTERVAL = os.environ.get("YAHOO_INTERVAL", "1d")  # "1d"
-PRICE_FIELD = os.environ.get("PRICE_FIELD", "close").lower()  # "close" (추천) or "adjclose"
-
-# Retry/backoff
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "10"))
-BASE_BACKOFF_SEC = float(os.environ.get("BASE_BACKOFF_SEC", "2.0"))
-
-# Make Yahoo happier
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json,text/plain,*/*",
-    "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
-    "Connection": "keep-alive",
+{
+  "asof_utc": "2026-02-09T04:15:11Z",
+  "source": "stooq",
+  "params": {
+    "rsi": 14,
+    "ema": 20,
+    "sma": 60
+  },
+  "tickers": {
+    "AAPL": {
+      "daily": {
+        "last_date": "2026-02-06",
+        "last_close": 278.12,
+        "last_volume": 50453414,
+        "rsi14": 69.02580726157865,
+        "ema20": 264.858467011876,
+        "sma60": 269.10516666666666
+      },
+      "weekly": {
+        "last_date": "2026-02-06",
+        "last_close": 278.12,
+        "last_volume": 332284645,
+        "rsi14": 62.36744852783814,
+        "ema20": 260.11860594142405,
+        "sma60": 235.17195000000007
+      },
+      "monthly": {
+        "last_date": "2026-02-06",
+        "last_close": 278.12,
+        "last_volume": 332284645,
+        "rsi14": 66.5318169291836,
+        "ema20": 237.0175916594474,
+        "sma60": 186.1283
+      }
+    },
+    "TSLA": {
+      "daily": {
+        "last_date": "2026-02-06",
+        "last_close": 411.11,
+        "last_volume": 62677144,
+        "rsi14": 41.493143150721856,
+        "ema20": 427.4056798066671,
+        "sma60": 438.70749999999987
+      },
+      "weekly": {
+        "last_date": "2026-02-06",
+        "last_close": 411.11,
+        "last_volume": 325729859,
+        "rsi14": 49.29769156712764,
+        "ema20": 425.11822706054147,
+        "sma60": 366.8061666666665
+      },
+      "monthly": {
+        "last_date": "2026-02-06",
+        "last_close": 411.11,
+        "last_volume": 325729859,
+        "rsi14": 58.90416907420105,
+        "ema20": 353.884771074097,
+        "sma60": 275.4134833333334
+      }
+    },
+    "PLTR": {
+      "daily": {
+        "last_date": "2026-02-06",
+        "last_close": 135.9,
+        "last_volume": 62661425,
+        "rsi14": 31.770626701011324,
+        "ema20": 157.37955497427947,
+        "sma60": 172.41941666666665
+      },
+      "weekly": {
+        "last_date": "2026-02-06",
+        "last_close": 135.9,
+        "last_volume": 455532088,
+        "rsi14": 39.69252258184402,
+        "ema20": 166.5001744900515,
+        "sma60": 137.37800000000001
+      },
+      "monthly": {
+        "last_date": "2026-02-06",
+        "last_close": 135.9,
+        "last_volume": 455532088,
+        "rsi14": 59.598888647554354,
+        "ema20": 120.57106325682315,
+        "sma60": 48.191833333333335
+      }
+    },
+    "MSTZ": {
+      "daily": {
+        "last_date": "2026-02-06",
+        "last_close": 13.33,
+        "last_volume": 41455009,
+        "rsi14": 45.81246946285403,
+        "ema20": 16.599456142217004,
+        "sma60": 14.31575
+      },
+      "weekly": {
+        "last_date": "2026-02-06",
+        "last_close": 13.33,
+        "last_volume": 142732953,
+        "rsi14": 43.56757339796291,
+        "ema20": 12.37251001975736,
+        "sma60": 10.369083333333334
+      },
+      "monthly": {
+        "last_date": "2026-02-06",
+        "last_close": 13.33,
+        "last_volume": 142732953,
+        "rsi14": 9.010117369049254,
+        "ema20": null,
+        "sma60": null
+      }
+    }
+  }
 }
-
-
-def read_tickers(path=TICKERS_FILE):
-    out = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            s = line.strip()
-            if s and not s.startswith("#"):
-                out.append(s.upper())
-    return out
-
-
-def sma(values, period):
-    if len(values) < period:
-        return None
-    return sum(values[-period:]) / period
-
-
-def ema(values, period):
-    if len(values) < period:
-        return None
-    k = 2 / (period + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = v * k + e * (1 - k)
-    return e
-
-
-def rsi_wilder_last(values, period=14):
-    """Wilder RSI (TradingView/Yahoo 스타일에 근접) - 마지막 값만."""
-    if len(values) < period + 1:
-        return None
-
-    gains = []
-    losses = []
-    for i in range(1, len(values)):
-        diff = values[i] - values[i - 1]
-        gains.append(max(diff, 0.0))
-        losses.append(max(-diff, 0.0))
-
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
-def compute_indicators(close_series):
-    return {
-        "rsi14": rsi_wilder_last(close_series, RSI_PERIOD),
-        "ema20": ema(close_series, EMA_PERIOD),
-        "sma60": sma(close_series, SMA_PERIOD),
-    }
-
-
-def fetch_yahoo_daily(symbol: str, range_str=RANGE_STR, interval=INTERVAL):
-    """
-    Yahoo Chart API:
-    https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=10y&interval=1d
-    - returns (dates, o, h, l, c_display, v, c_for_indicators)
-    """
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {"range": range_str, "interval": interval, "includePrePost": "false"}
-
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=30)
-
-            # 흔한 제한/오류: 429, 5xx 등
-            if r.status_code in (429, 500, 502, 503, 504):
-                raise RuntimeError(f"{symbol}: HTTP {r.status_code}")
-
-            r.raise_for_status()
-            data = r.json()
-
-            chart = data.get("chart", {})
-            err = chart.get("error")
-            if err:
-                raise RuntimeError(f"{symbol}: yahoo error {err}")
-
-            result = chart.get("result")
-            if not result:
-                raise RuntimeError(f"{symbol}: no result")
-
-            res0 = result[0]
-            ts = res0.get("timestamp") or []
-            ind = res0.get("indicators") or {}
-            quote = (ind.get("quote") or [{}])[0]
-
-            opens = quote.get("open") or []
-            highs = quote.get("high") or []
-            lows = quote.get("low") or []
-            closes = quote.get("close") or []
-            vols = quote.get("volume") or []
-
-            adjcloses = None
-            adj = (ind.get("adjclose") or [])
-            if adj and isinstance(adj, list) and adj[0].get("adjclose"):
-                adjcloses = adj[0].get("adjclose")
-
-            dates = []
-            o, h, l, c_display, v, c_src = [], [], [], [], [], []
-
-            for i in range(len(ts)):
-                if i >= len(closes) or closes[i] is None:
-                    continue
-
-                dt = datetime.fromtimestamp(ts[i], tz=timezone.utc).strftime("%Y-%m-%d")
-                dates.append(dt)
-
-                c_val = float(closes[i])
-                o.append(float(opens[i]) if i < len(opens) and opens[i] is not None else c_val)
-                h.append(float(highs[i]) if i < len(highs) and highs[i] is not None else c_val)
-                l.append(float(lows[i]) if i < len(lows) and lows[i] is not None else c_val)
-                v.append(int(vols[i]) if i < len(vols) and vols[i] is not None else 0)
-
-                c_display.append(c_val)
-
-                if PRICE_FIELD == "adjclose" and adjcloses and i < len(adjcloses) and adjcloses[i] is not None:
-                    c_src.append(float(adjcloses[i]))
-                else:
-                    c_src.append(c_val)
-
-            if len(dates) < 120:
-                raise RuntimeError(f"{symbol}: insufficient rows ({len(dates)})")
-
-            # 정렬 안전장치
-            idx = sorted(range(len(dates)), key=lambda k: dates[k])
-            dates = [dates[i] for i in idx]
-            o = [o[i] for i in idx]
-            h = [h[i] for i in idx]
-            l = [l[i] for i in idx]
-            c_display = [c_display[i] for i in idx]
-            v = [v[i] for i in idx]
-            c_src = [c_src[i] for i in idx]
-
-            return dates, o, h, l, c_display, v, c_src
-
-        except Exception as e:
-            last_err = e
-            # 지수 백오프 (2,4,8,16..)
-            sleep_s = BASE_BACKOFF_SEC * (2 ** (attempt - 1))
-            time.sleep(min(sleep_s, 60.0))
-
-    raise RuntimeError(f"{symbol}: fetch failed. last={last_err}")
-
-
-def _iso_week_key(date_str: str):
-    dt = datetime(int(date_str[0:4]), int(date_str[5:7]), int(date_str[8:10]))
-    iso = dt.isocalendar()
-    return int(iso.year), int(iso.week)
-
-
-def resample_weekly(dates, o, h, l, c_disp, v, c_src):
-    buckets = {}
-    for i, d in enumerate(dates):
-        key = _iso_week_key(d)
-        if key not in buckets:
-            buckets[key] = {"fi": i, "li": i, "high": h[i], "low": l[i], "vol": v[i]}
-        else:
-            b = buckets[key]
-            b["li"] = i
-            b["high"] = max(b["high"], h[i])
-            b["low"] = min(b["low"], l[i])
-            b["vol"] += v[i]
-
-    out_dates, out_cdisp, out_csrc, out_v = [], [], [], []
-    for key in sorted(buckets.keys()):
-        b = buckets[key]
-        li = b["li"]
-        out_dates.append(dates[li])
-        out_cdisp.append(c_disp[li])
-        out_csrc.append(c_src[li])
-        out_v.append(b["vol"])
-
-    return {"dates": out_dates, "close": out_cdisp, "close_src": out_csrc, "volume": out_v}
-
-
-def resample_monthly(dates, o, h, l, c_disp, v, c_src):
-    buckets = {}
-    for i, d in enumerate(dates):
-        key = (int(d[0:4]), int(d[5:7]))
-        if key not in buckets:
-            buckets[key] = {"fi": i, "li": i, "high": h[i], "low": l[i], "vol": v[i]}
-        else:
-            b = buckets[key]
-            b["li"] = i
-            b["high"] = max(b["high"], h[i])
-            b["low"] = min(b["low"], l[i])
-            b["vol"] += v[i]
-
-    out_dates, out_cdisp, out_csrc, out_v = [], [], [], []
-    for key in sorted(buckets.keys()):
-        b = buckets[key]
-        li = b["li"]
-        out_dates.append(dates[li])
-        out_cdisp.append(c_disp[li])
-        out_csrc.append(c_src[li])
-        out_v.append(b["vol"])
-
-    return {"dates": out_dates, "close": out_cdisp, "close_src": out_csrc, "volume": out_v}
-
-
-def load_previous_report(path=OUT_PATH):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def write_report_atomic(report, path=OUT_PATH):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
-
-
-def main():
-    tickers = read_tickers()
-
-    prev = load_previous_report(OUT_PATH)
-
-    report = {
-        "asof_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "source": "yahoo_chart_api",
-        "price_field_for_indicators": PRICE_FIELD,
-        "params": {"rsi": RSI_PERIOD, "ema": EMA_PERIOD, "sma": SMA_PERIOD},
-        "tickers": {},
-        "status": "ok",
-    }
-
-    any_success = False
-    errors = {}
-
-    for sym in tickers:
-        try:
-            dates, o, h, l, c_disp, v, c_src = fetch_yahoo_daily(sym)
-            any_success = True
-
-            daily_ind = compute_indicators(c_src)
-
-            w = resample_weekly(dates, o, h, l, c_disp, v, c_src)
-            m = resample_monthly(dates, o, h, l, c_disp, v, c_src)
-
-            weekly_ind = compute_indicators(w["close_src"]) if w["close_src"] else {"rsi14": None, "ema20": None, "sma60": None}
-            monthly_ind = compute_indicators(m["close_src"]) if m["close_src"] else {"rsi14": None, "ema20": None, "sma60": None}
-
-            report["tickers"][sym] = {
-                "daily": {
-                    "last_date": dates[-1],
-                    "last_close": c_disp[-1],
-                    "last_volume": v[-1],
-                    **daily_ind,
-                },
-                "weekly": {
-                    "last_date": w["dates"][-1] if w["dates"] else None,
-                    "last_close": w["close"][-1] if w["close"] else None,
-                    "last_volume": w["volume"][-1] if w["volume"] else None,
-                    **weekly_ind,
-                },
-                "monthly": {
-                    "last_date": m["dates"][-1] if m["dates"] else None,
-                    "last_close": m["close"][-1] if m["close"] else None,
-                    "last_volume": m["volume"][-1] if m["volume"] else None,
-                    **monthly_ind,
-                },
-            }
-
-            # 호출 텀(차단 리스크 낮추기)
-            time.sleep(0.4)
-
-        except Exception as e:
-            errors[sym] = str(e)
-
-    if not any_success:
-        # ✅ Yahoo 전체 실패: report.json을 덮어쓰지 않고 유지
-        # (어제 데이터가 그대로 남게 해서 일관성/신뢰를 지킴)
-        if prev is None:
-            # 첫 실행부터 실패하면 파일이 없을 수도 있으니, 최소한 에러 리포트는 남김
-            fail_report = {
-                "asof_utc": report["asof_utc"],
-                "source": "yahoo_chart_api",
-                "price_field_for_indicators": PRICE_FIELD,
-                "params": report["params"],
-                "tickers": {},
-                "status": "all_failed_keep_previous_none",
-                "errors": errors,
-            }
-            write_report_atomic(fail_report, OUT_PATH)
-        else:
-            # 이전 파일 유지: 아무 것도 쓰지 않음
-            pass
-        return
-
-    # 일부 성공/일부 실패면: 성공 종목은 갱신하고 실패 종목은 이전 값 유지(있으면)
-    # (이렇게 하면 “소스는 Yahoo 고정” + “가능한 종목만 최신화”)
-    report["errors"] = errors
-
-    if prev and isinstance(prev.get("tickers"), dict):
-        for sym, err in errors.items():
-            if sym not in report["tickers"] and sym in prev["tickers"]:
-                report["tickers"][sym] = prev["tickers"][sym]
-
-    report["status"] = "partial_ok" if errors else "ok"
-    write_report_atomic(report, OUT_PATH)
-
-
-if __name__ == "__main__":
-    main()
