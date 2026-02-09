@@ -45,20 +45,31 @@ def ema(values, period):
 
 
 def rsi(values, period=14):
+    """
+    Wilder's RSI (TradingView/대부분 지표에 더 근접)
+    """
     if len(values) < period + 1:
         return None
-    gains = 0.0
-    losses = 0.0
-    for i in range(len(values) - period, len(values)):
+
+    gains = []
+    losses = []
+    for i in range(1, len(values)):
         diff = values[i] - values[i - 1]
-        if diff >= 0:
-            gains += diff
-        else:
-            losses += -diff
-    if losses == 0:
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    if avg_loss == 0:
         return 100.0
-    rs = (gains / period) / (losses / period)
-    return 100 - (100 / (1 + rs))
+
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
 
 
 def compute_indicators(close_series):
@@ -77,7 +88,6 @@ def fetch_stooq_daily(us_symbol: str, keep_last: int = 3000):
     """
     Stooq CSV:
       https://stooq.com/q/d/l/?s=aapl.us&i=d
-    보통 오래된->최신 오름차순이라,
     전체를 읽은 뒤 Date 정렬 후 '최신 keep_last개'만 사용해서
     last_date가 과거로 고정되는 문제를 방지한다.
     """
@@ -226,3 +236,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```0
