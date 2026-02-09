@@ -17,8 +17,9 @@ OUTPUTSIZE = "compact"
 
 
 def read_tickers():
-    with open("tickers.txt", "r") as f:
-        return [l.strip().upper() for l in f if l.strip()]
+    path = os.environ.get("TICKERS_FILE", "tickers.txt")
+    with open(path, "r", encoding="utf-8") as f:
+        return [l.strip().upper() for l in f if l.strip() and not l.strip().startswith("#")]
 
 
 def sma(values, period):
@@ -40,8 +41,8 @@ def ema(values, period):
 def rsi(values, period=14):
     if len(values) < period + 1:
         return None
-    gains = 0
-    losses = 0
+    gains = 0.0
+    losses = 0.0
     for i in range(len(values) - period, len(values)):
         diff = values[i] - values[i - 1]
         if diff >= 0:
@@ -49,7 +50,7 @@ def rsi(values, period=14):
         else:
             losses += -diff
     if losses == 0:
-        return 100
+        return 100.0
     rs = (gains / period) / (losses / period)
     return 100 - (100 / (1 + rs))
 
@@ -66,26 +67,34 @@ def fetch_daily_adjusted(symbol):
     backoff = INITIAL_BACKOFF
     last_keys = None
 
-    for _ in range(MAX_RETRIES):
+    for attempt in range(1, MAX_RETRIES + 1):
+        print(f"[{symbol}] attempt {attempt}/{MAX_RETRIES} ...", flush=True)
+
         r = requests.get(url, params=params, timeout=30)
         data = r.json()
         last_keys = list(data.keys())
+        print(f"[{symbol}] payload keys = {last_keys}", flush=True)
 
         ts = data.get("Time Series (Daily)")
         if ts:
             dates = sorted(ts.keys())
             close = [float(ts[d]["4. close"]) for d in dates]
             volume = [int(float(ts[d]["6. volume"])) for d in dates]
+            print(f"[{symbol}] OK: got {len(dates)} days", flush=True)
             return dates, close, volume
 
         if "Information" in data or "Note" in data:
+            msg = data.get("Information") or data.get("Note") or ""
+            print(f"[{symbol}] THROTTLED: waiting {backoff}s. msg={msg[:80]}", flush=True)
             time.sleep(backoff)
             backoff = min(backoff * 2, BACKOFF_CAP)
             continue
 
         if "Error Message" in data:
+            print(f"[{symbol}] ERROR MESSAGE: {data.get('Error Message')}", flush=True)
             raise RuntimeError(f"{symbol} invalid")
 
+        print(f"[{symbol}] Unknown payload. waiting {backoff}s", flush=True)
         time.sleep(backoff)
         backoff = min(backoff * 2, BACKOFF_CAP)
 
@@ -94,9 +103,13 @@ def fetch_daily_adjusted(symbol):
 
 def main():
     tickers = read_tickers()
+
     report = {
-        "asof_utc": datetime.now(timezone.utc).isoformat(),
-        "tickers": {}
+        "asof_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": "alphavantage",
+        "outputsize": OUTPUTSIZE,
+        "params": {"rsi": RSI_PERIOD, "ema": EMA_PERIOD, "sma": SMA_PERIOD},
+        "tickers": {},
     }
 
     for sym in tickers:
@@ -111,12 +124,15 @@ def main():
             "sma60": sma(close, SMA_PERIOD),
         }
 
+        # 무료 플랜 레이트리밋 완화
         time.sleep(3)
 
-    os.makedirs("public", exist_ok=True)
-    with open("public/report.json", "w") as f:
-        json.dump(report, f, indent=2)
+    out_path = os.environ.get("OUT_PATH", "public/report.json")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
     main()
+```0
