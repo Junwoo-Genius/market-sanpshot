@@ -1,0 +1,36 @@
+name: market-snapshot-daily
+
+on:
+  schedule:
+    # 매일 07:10 KST에 맞추려면 UTC 기준으로 조정 필요
+    # 여기서는 일단 매일 00:10 UTC(=09:10 KST)로 설정
+    - cron: "10 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install requests
+
+      - name: Run bot
+        env:
+          ALPHAVANTAGE_KEY: ${{ secrets.ALPHAVANTAGE_KEY }}
+        run: python bot.py
+
+      - name: Commit report
+        run: |
+          git config user.name "snapshot-bot"
+          git config user.email "snapshot-bot@users.noreply.github.com"
+          git add public/report.json
+          git commit -m "update report" || echo "no changes"
+          git push
