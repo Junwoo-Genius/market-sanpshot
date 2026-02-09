@@ -81,12 +81,6 @@ def to_stooq_symbol(us_symbol: str) -> str:
 
 
 def fetch_stooq_daily(us_symbol: str, keep_last: int = 3000):
-    """
-    Stooq CSV (daily):
-      https://stooq.com/q/d/l/?s=aapl.us&i=d
-    Columns: Date,Open,High,Low,Close,Volume
-    We sort by Date and keep only latest keep_last rows.
-    """
     params = {"s": to_stooq_symbol(us_symbol), "i": "d"}
     r = requests.get(STOOQ_BASE, params=params, timeout=30)
     r.raise_for_status()
@@ -135,18 +129,15 @@ def resample_weekly(dates, o, h, l, c, v):
             b["low"] = min(b["low"], l[i])
             b["vol"] += v[i]
 
-    out_dates, out_o, out_h, out_l, out_c, out_v = [], [], [], [], [], []
+    out_dates, out_c, out_v = [], [], []
     for key in sorted(buckets.keys()):
         b = buckets[key]
-        fi, li = b["fi"], b["li"]
-        out_dates.append(dates[li])  # last trading day of the week
-        out_o.append(o[fi])
-        out_h.append(b["high"])
-        out_l.append(b["low"])
+        li = b["li"]
+        out_dates.append(dates[li])
         out_c.append(c[li])
         out_v.append(b["vol"])
 
-    return {"dates": out_dates, "open": out_o, "high": out_h, "low": out_l, "close": out_c, "volume": out_v}
+    return {"dates": out_dates, "close": out_c, "volume": out_v}
 
 
 def resample_monthly(dates, o, h, l, c, v):
@@ -162,18 +153,15 @@ def resample_monthly(dates, o, h, l, c, v):
             b["low"] = min(b["low"], l[i])
             b["vol"] += v[i]
 
-    out_dates, out_o, out_h, out_l, out_c, out_v = [], [], [], [], [], []
+    out_dates, out_c, out_v = [], [], []
     for key in sorted(buckets.keys()):
         b = buckets[key]
-        fi, li = b["fi"], b["li"]
-        out_dates.append(dates[li])  # last trading day of the month
-        out_o.append(o[fi])
-        out_h.append(b["high"])
-        out_l.append(b["low"])
+        li = b["li"]
+        out_dates.append(dates[li])
         out_c.append(c[li])
         out_v.append(b["vol"])
 
-    return {"dates": out_dates, "open": out_o, "high": out_h, "low": out_l, "close": out_c, "volume": out_v}
+    return {"dates": out_dates, "close": out_c, "volume": out_v}
 
 
 def main():
@@ -195,6 +183,16 @@ def main():
 
         daily_ind = compute_indicators(c)
 
+        # ===== 최근 5거래일 거래량 관련 =====
+        last5_vol = v[-5:] if len(v) >= 5 else v[:]
+        last5_dates = dates[-5:] if len(dates) >= 5 else dates[:]
+
+        prev_vol = v[-2] if len(v) >= 2 else None
+        vol_change_pct = None
+        if prev_vol and prev_vol != 0:
+            vol_change_pct = (v[-1] - prev_vol) / prev_vol * 100.0
+        # ===================================
+
         w = resample_weekly(dates, o, h, l, c, v)
         m = resample_monthly(dates, o, h, l, c, v)
 
@@ -206,6 +204,10 @@ def main():
                 "last_date": dates[-1],
                 "last_close": c[-1],
                 "last_volume": v[-1],
+                "volumes_dates_last5": last5_dates,
+                "volumes_last5": last5_vol,
+                "prev_volume": prev_vol,
+                "vol_change_pct": vol_change_pct,
                 **daily_ind,
             },
             "weekly": {
