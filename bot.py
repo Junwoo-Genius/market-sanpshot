@@ -6,14 +6,11 @@
 #   1) public/report.json
 #   2) public/csv/{TICKER}_daily.csv  (최근 5년)
 #
-# 변경점:
-# - 종목 입력 파일을 tickers.json -> tickers.txt 로 변경
-#   * 한 줄에 한 종목
-#   * 빈 줄 무시
-#   * # 로 시작하면 주석 처리
+# 변경사항(핵심):
+# - pandas.compat.StringIO 사용 제거 → io.StringIO로 고정
+# - tickers.txt 사용 (줄 단위 종목, 주석/빈줄 허용)
 
-import json
-import time
+import os, json, time
 from datetime import datetime, timezone
 from pathlib import Path
 from io import StringIO
@@ -39,30 +36,17 @@ DEFAULT_PARAMS = {
     "history_days_csv": 1260,     # csv 저장용 (약 5년)
 }
 
-# tickers.txt (한 줄에 한 종목)
-# 예:
+# 종목 파일: tickers.txt (줄 단위)
+# 예)
 # IREN
 # PLTR
 # NVDA
-# #TSLA
 TICKERS_FILE = ROOT / "tickers.txt"
 
 
 # =========================
 # 유틸
 # =========================
-def to_stooq_symbol(ticker: str) -> str:
-    # Stooq 심볼: 미국 주식 기준 ".us"
-    t = ticker.strip().lower()
-    if t.endswith(".us"):
-        return t
-    return f"{t}.us"
-
-def stooq_daily_url(ticker: str) -> str:
-    # Stooq CSV 다운로드 (일봉)
-    # 예: https://stooq.com/q/d/l/?s=iren.us&i=d
-    return f"https://stooq.com/q/d/l/?s={to_stooq_symbol(ticker)}&i=d"
-
 def load_tickers_from_txt(path: Path) -> list[str]:
     if not path.exists():
         return ["IREN"]
@@ -74,9 +58,34 @@ def load_tickers_from_txt(path: Path) -> list[str]:
             continue
         if s.startswith("#"):
             continue
-        tickers.append(s.upper())
+        # "IREN,PLTR" 같이 들어왔을 가능성도 방어
+        parts = [p.strip() for p in s.replace(";", ",").split(",")]
+        for p in parts:
+            if p and not p.startswith("#"):
+                tickers.append(p.upper())
 
-    return tickers if tickers else ["IREN"]
+    # 중복 제거(순서 유지)
+    seen = set()
+    uniq = []
+    for t in tickers:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq or ["IREN"]
+
+
+# Stooq 심볼 변환: 미국 주식 기준 ".us"
+def to_stooq_symbol(ticker: str) -> str:
+    t = ticker.strip().lower()
+    if t.endswith(".us"):
+        return t
+    return f"{t}.us"
+
+
+def stooq_daily_url(ticker: str) -> str:
+    # Stooq CSV 다운로드 (일봉)
+    # 예: https://stooq.com/q/d/l/?s=iren.us&i=d
+    return f"https://stooq.com/q/d/l/?s={to_stooq_symbol(ticker)}&i=d"
 
 
 # =========================
@@ -87,13 +96,11 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
 
-    # Wilder smoothing (EMA alpha=1/period)
-    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+    # Wilder smoothing과 유사한 EMA(alpha=1/period)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
 
-    # 0 분모 방지
-    avg_loss = avg_loss.replace(0, pd.NA)
-    rs = avg_gain / avg_loss
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
@@ -107,14 +114,10 @@ def fetch_stooq_daily(ticker: str, retries: int = 3, timeout: int = 20) -> pd.Da
 
     for i in range(retries):
         try:
-            r = requests.get(
-                url,
-                timeout=timeout,
-                headers={"User-Agent": "market-snapshot-bot/1.0"},
-            )
+            r = requests.get(url, timeout=timeout, headers={"User-Agent": "market-snapshot-bot/1.0"})
             r.raise_for_status()
 
-            # Stooq CSV: Date,Open,High,Low,Close,Volume
+            # Stooq: Date,Open,High,Low,Close,Volume
             df = pd.read_csv(StringIO(r.text))
 
             if "Date" not in df.columns:
@@ -123,20 +126,20 @@ def fetch_stooq_daily(ticker: str, retries: int = 3, timeout: int = 20) -> pd.Da
             df["Date"] = pd.to_datetime(df["Date"], utc=False)
             df = df.sort_values("Date").reset_index(drop=True)
 
-            # Volume이 '-' 혹은 NaN일 수 있음
+            # 숫자 변환 방어
+            for c in ["Open", "High", "Low", "Close"]:
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+
             if "Volume" in df.columns:
                 df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0).astype("int64")
             else:
                 df["Volume"] = 0
 
-            # 숫자 컬럼 보정
-            for c in ["Open", "High", "Low", "Close"]:
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-                else:
-                    raise ValueError(f"Stooq CSV format unexpected (no {c} column).")
+            # 유효 데이터 체크
+            if df["Close"].isna().all():
+                raise ValueError("All Close values are NaN after parsing.")
 
-            df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"]).reset_index(drop=True)
             return df
 
         except Exception as e:
@@ -157,6 +160,7 @@ def save_csv_5y(ticker: str, df: pd.DataFrame, history_days: int) -> None:
     path = CSV_DIR / f"{ticker.upper()}_daily.csv"
     out.to_csv(path, index=False)
 
+
 def build_report_entry(ticker: str, df: pd.DataFrame, params: dict) -> dict:
     df1y = df.tail(params["history_days_report"]).copy()
 
@@ -167,17 +171,18 @@ def build_report_entry(ticker: str, df: pd.DataFrame, params: dict) -> dict:
     last = df1y.iloc[-1]
     last_date = last["Date"].strftime("%Y-%m-%d")
 
-    # history_1y: OHLCV 전부 저장 (차트/매물대/지지저항 계산용)
-    history_1y: list[dict] = []
+    history_1y = []
     for _, row in df1y.iterrows():
-        history_1y.append({
-            "date": row["Date"].strftime("%Y-%m-%d"),
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
-            "volume": int(row["Volume"]),
-        })
+        history_1y.append(
+            {
+                "date": row["Date"].strftime("%Y-%m-%d"),
+                "open": float(row["Open"]) if pd.notna(row["Open"]) else None,
+                "high": float(row["High"]) if pd.notna(row["High"]) else None,
+                "low": float(row["Low"]) if pd.notna(row["Low"]) else None,
+                "close": float(row["Close"]) if pd.notna(row["Close"]) else None,
+                "volume": int(row["Volume"]) if pd.notna(row["Volume"]) else 0,
+            }
+        )
 
     def safe_float(x):
         try:
@@ -187,17 +192,14 @@ def build_report_entry(ticker: str, df: pd.DataFrame, params: dict) -> dict:
 
     daily = {
         "last_date": last_date,
-        "last_close": float(last["Close"]),
-        "last_volume": int(last["Volume"]),
+        "last_close": safe_float(last["Close"]),
+        "last_volume": int(last["Volume"]) if pd.notna(last["Volume"]) else 0,
         "rsi14": safe_float(last["RSI14"]),
         "ema20": safe_float(last["EMA20"]),
         "sma60": safe_float(last["SMA60"]),
     }
 
-    return {
-        "daily": daily,
-        "history_1y": history_1y,
-    }
+    return {"daily": daily, "history_1y": history_1y}
 
 
 def main():
@@ -219,7 +221,7 @@ def main():
         "tickers": {},
     }
 
-    errors: dict[str, str] = {}
+    errors = {}
 
     for t in tickers:
         try:
@@ -234,13 +236,12 @@ def main():
         except Exception as e:
             errors[t] = str(e)
 
-    # 에러도 함께 저장(디버깅용)
     if errors:
         report["errors"] = errors
 
     (PUBLIC_DIR / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2),
-        encoding="utf-8"
+        encoding="utf-8",
     )
 
 
