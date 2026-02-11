@@ -5,10 +5,18 @@
 # - 산출물:
 #   1) public/report.json
 #   2) public/csv/{TICKER}_daily.csv  (최근 5년)
+#
+# 변경점:
+# - 종목 입력 파일을 tickers.json -> tickers.txt 로 변경
+#   * 한 줄에 한 종목
+#   * 빈 줄 무시
+#   * # 로 시작하면 주석 처리
 
-import os, json, time
+import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from io import StringIO
 
 import pandas as pd
 import requests
@@ -31,12 +39,20 @@ DEFAULT_PARAMS = {
     "history_days_csv": 1260,     # csv 저장용 (약 5년)
 }
 
-# tickers.json (없으면 기본)
-# 예: ["IREN","PLTR","NVDA"]
+# tickers.txt (한 줄에 한 종목)
+# 예:
+# IREN
+# PLTR
+# NVDA
+# #TSLA
 TICKERS_FILE = ROOT / "tickers.txt"
 
-# Stooq 심볼 변환: 미국 주식 기준 ".us"
+
+# =========================
+# 유틸
+# =========================
 def to_stooq_symbol(ticker: str) -> str:
+    # Stooq 심볼: 미국 주식 기준 ".us"
     t = ticker.strip().lower()
     if t.endswith(".us"):
         return t
@@ -47,6 +63,21 @@ def stooq_daily_url(ticker: str) -> str:
     # 예: https://stooq.com/q/d/l/?s=iren.us&i=d
     return f"https://stooq.com/q/d/l/?s={to_stooq_symbol(ticker)}&i=d"
 
+def load_tickers_from_txt(path: Path) -> list[str]:
+    if not path.exists():
+        return ["IREN"]
+
+    tickers: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            continue
+        tickers.append(s.upper())
+
+    return tickers if tickers else ["IREN"]
+
 
 # =========================
 # 기술지표
@@ -56,11 +87,13 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
 
-    # Wilder's smoothing (EMA with alpha=1/period) 유사
+    # Wilder smoothing (EMA alpha=1/period)
     avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
 
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    # 0 분모 방지
+    avg_loss = avg_loss.replace(0, pd.NA)
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
@@ -71,30 +104,52 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
 def fetch_stooq_daily(ticker: str, retries: int = 3, timeout: int = 20) -> pd.DataFrame:
     url = stooq_daily_url(ticker)
     last_err = None
+
     for i in range(retries):
         try:
-            r = requests.get(url, timeout=timeout, headers={"User-Agent": "market-snapshot-bot/1.0"})
+            r = requests.get(
+                url,
+                timeout=timeout,
+                headers={"User-Agent": "market-snapshot-bot/1.0"},
+            )
             r.raise_for_status()
-            # Stooq: Date,Open,High,Low,Close,Volume
-            df = pd.read_csv(pd.compat.StringIO(r.text)) if hasattr(pd, "compat") else pd.read_csv(pd.io.common.StringIO(r.text))
+
+            # Stooq CSV: Date,Open,High,Low,Close,Volume
+            df = pd.read_csv(StringIO(r.text))
+
             if "Date" not in df.columns:
                 raise ValueError("Stooq CSV format unexpected (no Date column).")
+
             df["Date"] = pd.to_datetime(df["Date"], utc=False)
             df = df.sort_values("Date").reset_index(drop=True)
-            # 일부 종목은 Volume이 '-' 혹은 NaN일 수 있음
+
+            # Volume이 '-' 혹은 NaN일 수 있음
             if "Volume" in df.columns:
                 df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0).astype("int64")
+            else:
+                df["Volume"] = 0
+
+            # 숫자 컬럼 보정
+            for c in ["Open", "High", "Low", "Close"]:
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+                else:
+                    raise ValueError(f"Stooq CSV format unexpected (no {c} column).")
+
+            df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"]).reset_index(drop=True)
             return df
+
         except Exception as e:
             last_err = e
             time.sleep(1.2 * (i + 1))
+
     raise RuntimeError(f"Failed to fetch {ticker} from Stooq after {retries} retries: {last_err}")
 
 
 # =========================
 # 저장
 # =========================
-def save_csv_5y(ticker: str, df: pd.DataFrame, history_days: int):
+def save_csv_5y(ticker: str, df: pd.DataFrame, history_days: int) -> None:
     out = df.tail(history_days).copy()
     out_cols = ["Date", "Open", "High", "Low", "Close", "Volume"]
     out = out[out_cols]
@@ -113,7 +168,7 @@ def build_report_entry(ticker: str, df: pd.DataFrame, params: dict) -> dict:
     last_date = last["Date"].strftime("%Y-%m-%d")
 
     # history_1y: OHLCV 전부 저장 (차트/매물대/지지저항 계산용)
-    history_1y = []
+    history_1y: list[dict] = []
     for _, row in df1y.iterrows():
         history_1y.append({
             "date": row["Date"].strftime("%Y-%m-%d"),
@@ -124,7 +179,6 @@ def build_report_entry(ticker: str, df: pd.DataFrame, params: dict) -> dict:
             "volume": int(row["Volume"]),
         })
 
-    # daily snapshot (마지막 1일 값 + 지표)
     def safe_float(x):
         try:
             return float(x) if pd.notna(x) else None
@@ -142,17 +196,12 @@ def build_report_entry(ticker: str, df: pd.DataFrame, params: dict) -> dict:
 
     return {
         "daily": daily,
-        "history_1y": history_1y
+        "history_1y": history_1y,
     }
 
 
 def main():
-    if TICKERS_FILE.exists():
-        tickers = json.loads(TICKERS_FILE.read_text(encoding="utf-8"))
-        tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
-    else:
-        tickers = ["IREN"]
-
+    tickers = load_tickers_from_txt(TICKERS_FILE)
     params = DEFAULT_PARAMS.copy()
 
     asof_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -167,10 +216,10 @@ def main():
             "history_days_report": params["history_days_report"],
             "history_days_csv": params["history_days_csv"],
         },
-        "tickers": {}
+        "tickers": {},
     }
 
-    errors = {}
+    errors: dict[str, str] = {}
 
     for t in tickers:
         try:
@@ -189,9 +238,11 @@ def main():
     if errors:
         report["errors"] = errors
 
-    (PUBLIC_DIR / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (PUBLIC_DIR / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":
     main()
-
