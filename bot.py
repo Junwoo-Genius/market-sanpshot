@@ -123,35 +123,18 @@ def fetch_stooq_daily(us_symbol: str, keep_last: int = KEEP_LAST):
     return dates, o, h, l, c, v
 
 
-def assert_csv_has_newlines(path: str, min_lines: int = 200):
-    """
-    GitHub raw / 일부 로더에서 '전체 1줄'로 인식되는 문제를 조기 감지.
-    최소 줄 수(min_lines) 미만이면 개행이 깨졌거나 저장이 비정상일 확률이 높음.
-    """
-    with open(path, "r", encoding="utf-8") as f:
-        s = f.read()
-    if s.count("\n") < min_lines:
-        raise RuntimeError(f"CSV newline seems broken: {path} (too few \\n)")
-
-
 def write_daily_csv(sym, dates, o, h, l, c, v, out_dir=CSV_DIR):
     """
     종목별 시계열(일봉 OHLCV)을 CSV로 저장 (차트용)
     저장 경로: public/csv/{TICKER}_daily.csv
-
-    핵심: GitHub raw/여러 로더에서 1줄 인식 문제를 막기 위해
-         라인 종결자를 LF(\n)로 강제한다.
     """
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{sym.upper()}_daily.csv")
-
-    # newline="\n" + lineterminator="\n" 조합으로 '항상 LF' 고정
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        w = csv.writer(f, lineterminator="\n")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
         w.writerow(["Date", "Open", "High", "Low", "Close", "Volume"])
         for i in range(len(dates)):
             w.writerow([dates[i], o[i], h[i], l[i], c[i], v[i]])
-
     return path
 
 
@@ -232,18 +215,14 @@ def main():
             report["tickers"][sym] = {"error": str(e)}
             continue
 
-        # ✅ 시계열 CSV 저장 (차트용) + 개행 검증
+        # 시계열 CSV 저장 (차트용)
         try:
-            csv_path = write_daily_csv(sym, dates, o, h, l, c, v, out_dir=CSV_DIR)
-            # 너무 짧은 시계열(예: 신규 상장) 대비해서 동적 임계치 적용
-            min_lines = max(30, min(200, len(dates) // 3))
-            assert_csv_has_newlines(csv_path, min_lines=min_lines)
+            write_daily_csv(sym, dates, o, h, l, c, v, out_dir=CSV_DIR)
         except Exception as e:
-            # CSV 저장 실패/검증 실패는 report 생성 자체를 막지 않음(에러만 기록)
             report["tickers"].setdefault(sym, {})
             report["tickers"][sym]["csv_error"] = str(e)
 
-        # ===== 거래량1용 last5 추가 =====
+        # 거래량1용 last5 추가
         last5_vol = v[-5:] if len(v) >= 5 else v[:]
         last5_dates = dates[-5:] if len(dates) >= 5 else dates[:]
 
@@ -285,7 +264,10 @@ def main():
             },
         }
 
-    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+    out_dir = os.path.dirname(OUT_PATH)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
     with open(OUT_PATH, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
