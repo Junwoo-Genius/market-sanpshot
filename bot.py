@@ -18,7 +18,7 @@ OUT_PATH = os.environ.get("OUT_PATH", "public/report.json")
 # CSV 저장 위치 (차트/시계열용)
 CSV_DIR = os.environ.get("CSV_DIR", "public/csv")
 
-# stooq에서 가져올 최대 행 수 (10년 이상 커버를 위해 넉넉하게)
+# stooq에서 가져올 최대 행 수 (넉넉히)
 KEEP_LAST = int(os.environ.get("KEEP_LAST", "5000"))
 
 
@@ -118,14 +118,16 @@ def fetch_stooq_daily(us_symbol: str, keep_last: int = KEEP_LAST):
         h.append(float(row["High"]))
         l.append(float(row["Low"]))
         c.append(float(row["Close"]))
-        v.append(int(float(row["Volume"])))
+        # stooq volume이 비어있거나 소수로 오는 경우 방어
+        vol_raw = row.get("Volume", "0")
+        v.append(int(float(vol_raw)) if vol_raw not in (None, "") else 0)
 
     return dates, o, h, l, c, v
 
 
 def write_daily_csv(sym, dates, o, h, l, c, v, out_dir=CSV_DIR):
     """
-    종목별 시계열(일봉 OHLCV)을 CSV로 저장 (차트용)
+    종목별 시계열(일봉 OHLCV)을 CSV로 저장
     저장 경로: public/csv/{TICKER}_daily.csv
     """
     os.makedirs(out_dir, exist_ok=True)
@@ -199,6 +201,10 @@ def resample_monthly(dates, o, h, l, c, v):
 
 
 def main():
+    # ✅ 출력 디렉토리 선생성 (Actions에서 경로 문제 방지)
+    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+    os.makedirs(CSV_DIR, exist_ok=True)
+
     tickers = read_tickers()
 
     report = {
@@ -215,15 +221,15 @@ def main():
             report["tickers"][sym] = {"error": str(e)}
             continue
 
-        # ✅ 시계열 CSV 저장 (차트용)
+        # ✅ 시계열 CSV 저장
         try:
-            write_daily_csv(sym, dates, o, h, l, c, v, out_dir=CSV_DIR)
+            csv_path = write_daily_csv(sym, dates, o, h, l, c, v, out_dir=CSV_DIR)
         except Exception as e:
-            # CSV 저장 실패는 report 생성 자체를 막지 않음(에러만 기록)
             report["tickers"].setdefault(sym, {})
             report["tickers"][sym]["csv_error"] = str(e)
+            csv_path = None
 
-        # ===== 거래량1용 last5 추가 =====
+        # last5 volume
         last5_vol = v[-5:] if len(v) >= 5 else v[:]
         last5_dates = dates[-5:] if len(dates) >= 5 else dates[:]
 
@@ -263,9 +269,10 @@ def main():
                 "last_volume": m["volume"][-1] if m["volume"] else None,
                 **monthly_ind,
             },
+            # 디버그용: CSV가 실제로 생성됐는지 확인 가능
+            "csv_path": csv_path,
         }
 
-    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
     with open(OUT_PATH, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
