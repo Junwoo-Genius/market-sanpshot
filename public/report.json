@@ -1,5 +1,5 @@
 {
-  "asof_utc": "2026-02-13T07:02:22Z",
+  "asof_utc": "2026-02-13T07:17:00Z",
   "source": "stooq",
   "params": {
     "rsi": 14,
@@ -47,7 +47,8 @@
         "rsi14": 57.3515810754402,
         "ema20": 119.92630135206124,
         "sma60": 48.079
-      }
+      },
+      "csv_path": "public/csv/PLTR_daily.csv"
     },
     "RKLB": {
       "daily": {
@@ -89,7 +90,8 @@
         "rsi14": 65.32865797970362,
         "ema20": 40.743515631610386,
         "sma60": 16.30125
-      }
+      },
+      "csv_path": "public/csv/RKLB_daily.csv"
     },
     "ASTS": {
       "daily": {
@@ -131,7 +133,8 @@
         "rsi14": 63.636913395948525,
         "ema20": 49.22991273778692,
         "sma60": 19.0605
-      }
+      },
+      "csv_path": "public/csv/ASTS_daily.csv"
     }
   }
 }
