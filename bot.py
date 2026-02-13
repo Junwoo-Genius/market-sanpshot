@@ -215,14 +215,15 @@ def main():
             report["tickers"][sym] = {"error": str(e)}
             continue
 
-        # 시계열 CSV 저장 (차트용)
+        # ✅ 시계열 CSV 저장 (차트용)
         try:
             write_daily_csv(sym, dates, o, h, l, c, v, out_dir=CSV_DIR)
         except Exception as e:
+            # CSV 저장 실패는 report 생성 자체를 막지 않음(에러만 기록)
             report["tickers"].setdefault(sym, {})
             report["tickers"][sym]["csv_error"] = str(e)
 
-        # 거래량1용 last5 추가
+        # ===== 거래량1용 last5 추가 =====
         last5_vol = v[-5:] if len(v) >= 5 else v[:]
         last5_dates = dates[-5:] if len(dates) >= 5 else dates[:]
 
@@ -264,10 +265,7 @@ def main():
             },
         }
 
-    out_dir = os.path.dirname(OUT_PATH)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-
+    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
     with open(OUT_PATH, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
