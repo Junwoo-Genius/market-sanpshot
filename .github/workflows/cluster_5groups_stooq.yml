@@ -1,0 +1,36 @@
+name: Cluster 5 Groups (Stooq, last 3y)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests scikit-learn python-dateutil
+
+      - name: Run clustering
+        run: |
+          python scripts/cluster_stooq_last3y.py
+
+      - name: Commit outputs to public/
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/cluster/*
+          git commit -m "Update cluster results (Stooq last3y)" || echo "No changes to commit"
+          git push
